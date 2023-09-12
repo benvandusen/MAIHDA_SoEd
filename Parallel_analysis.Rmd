@@ -1,0 +1,676 @@
+---
+title: "parallel analysis"
+output: html_document
+date: "8088-08-88"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(foreach)
+library(doParallel)
+library(parallel)
+library(tidyverse)
+library(kableExtra)
+library(multcomp)
+library(tidybayes)
+library(MuMIn)
+library(rstan)
+library(brms)
+library(lme4)
+```
+
+Setup cluster
+```{r cars, include=FALSE}
+ n.cores <- parallel::detectCores() - 2
+my.cluster <- parallel::makeCluster(
+  n.cores,
+  type = "FORK"
+  )
+
+#register it to be used by %dopar%
+doParallel::registerDoParallel(cl = my.cluster)
+```
+
+Set seed and course size
+```{r}
+course_enroll <- 50
+seed=12345
+set.seed (seed)
+```
+
+Simulation function
+```{r}
+sim_data <- function(n){
+    Sim<-data.frame(Race = sample(c(0,1,2,3,4),n, replace = TRUE, prob=c(.17,.07,.09,.77,.12)),
+                      women = sample(c(0,1),n, replace = TRUE, prob=c(.64,.36)),
+                      FG = sample(c(0,1),n, replace = TRUE, prob=c(.64,.36)))
+Sim <- Sim  %>%
+  mutate(Asian = ifelse(Race==0,1,0),
+         Black = ifelse(Race==1,1,0),
+         Hispanic = ifelse(Race==2 | Race==4,1,0),
+         White = ifelse(Race==3 | Race==4,1,0),
+         cluster = (1000000 + 100000*(Asian) +10000*(Black) +1000*(Hispanic) +100*(White) + 10*(women) + 1*(FG)),
+ score = 47 - 3*FG -10*women -6*Black -10*Hispanic +2*White +3*FG*women +1*White*Hispanic -1*FG*Black +2*FG*Hispanic +2*FG*White -2*women*Black + 1*women*Hispanic -4*women*White - 1*FG*White*Hispanic + 5*women*White*Hispanic + 4*FG*women*Black + 1*FG*women*White - 1* FG*women*White*Hispanic + rnorm(n, sd = 20))
+    Sim$course = rep(1:(n/course_enroll))
+    
+course_dif <- rnorm(n/course_enroll, sd = 10)
+course_dif <- rep(course_dif, course_enroll)
+Sim <- Sim %>%
+  mutate(course_diff = course_dif,
+         score = score + course_diff)
+
+return(Sim)}
+```
+
+Function for running frequentist HLM models
+```{r}
+HLM_freq_fun <- function(sim_data){
+temp <- lmer(score ~ 1 + women*(Black + Hispanic + White + White*Hispanic)*FG + (1|course), data = sim_data)
+
+return(temp)}
+```
+
+Function for running MAIHDA models
+```{r}
+MAIHDA_fun <- function(sim_data){
+temp <- brm(formula= score ~ 1 + women + Black + Hispanic + White + FG + (1|course) + (1|cluster), data=sim_data)
+
+return(temp)}
+```
+
+Function for running unconditional MAIHDA models
+```{r}
+Unc_MAIHDA_fun <- function(sim_data){
+temp <- brm(formula= score ~ 1 + (1|course) + (1|cluster), data=sim_data)
+
+return(temp)}
+```
+
+
+Function for calculating outcomes in HLM_freq models part 1
+```{r}
+get_est <- function(mod,groups){
+ #this summarizes a bunch of key features of your model making predictions for each group
+temp <- summary(multcomp::glht(mod, linfct=groups)) 
+
+# this looks at the covariance across variables and helps create accurate error bars when adding terms together
+temp_cov <- vcov(multcomp::glht(mod, linfct=groups)) 
+
+#this gives you the actual estimates for each group
+get.est <-  data.frame(group=rownames(temp$linfct), 
+             d = temp$test$coefficients, 
+             var.d = (temp$test$sigma)^2,
+             cov = temp_cov)
+
+#This combines the estimates with the correct error terms
+est <- get.est %>% group_by(group) %>% 
+                  summarise(Q = mean(d), 
+                            T = mean(var.d), 
+                            LCL = Q - 1.96*sqrt(T), 
+                            UCL = Q + 1.96*sqrt(T),
+                            SE = sqrt(T)) %>%
+  mutate(CG = word(group, 1), #This makes a new variable called "CG" and it uses the first word in the "group" variable for its values. You'll need to make sure this makes sense for your data.
+         Race = word(group, 2), #This makes a new variable called "Race" and it uses the second word in the "group" variable for its values. You'll need to make sure this makes sense for your data.
+         Gender = word(group, 3) #This makes a new variable called "Gender" and it uses the third word in the "group" variable for its values. You'll need to make sure this makes sense for your data.
+)
+return <- est}
+```
+
+Function for calculating outcomes in HLM_freq models part 2
+```{r}
+est_HLM_freq_fun <- function(mod) {
+#first for no interaction terms
+#         c(I,w,B,H,W,FG,HW, wB,wH,wW,wFG, BFG,HFG,WFG, wHW, HWF, wBFG,wHFG,wWFH,wHWFG)
+
+CAM   = c(1,0,0,0,0,0 ,0 , 0 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+CAW   = c(1,1,0,0,0,0 ,0 , 0 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+FAM   = c(1,0,0,0,0,1 ,0 , 0 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+FAW   = c(1,1,0,0,0,1 ,0 , 0 ,0 ,0 ,1  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+CBM   = c(1,0,1,0,0,0 ,0 , 0 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+CBW   = c(1,1,1,0,0,0 ,0 , 1 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+FBM   = c(1,0,1,0,0,1 ,0 , 0 ,0 ,0 ,0  ,1   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+FBW   = c(1,1,1,0,0,1 ,0 , 1 ,0 ,0 ,1  ,1   , 0 ,0  ,0   ,0   , 1   ,0   ,0   ,0    )
+CHM   = c(1,0,0,1,0,0 ,0 , 0 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+CHW   = c(1,1,0,1,0,0 ,0 , 0 ,1 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+FHM   = c(1,0,0,1,0,1 ,0 , 0 ,0 ,0 ,0  ,0   , 1 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+FHW   = c(1,1,0,1,0,1 ,0 , 0 ,1 ,0 ,1  ,0   , 1 ,0  ,0   ,0   , 0   ,1   ,0   ,0    )
+CWM   = c(1,0,0,0,1,0 ,0 , 0 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+CWW   = c(1,1,0,0,1,0 ,0 , 0 ,0 ,1 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+FWM   = c(1,0,0,0,1,1 ,0 , 0 ,0 ,0 ,0  ,0   , 0 ,1  ,0   ,0   , 0   ,0   ,0   ,0    )
+FWW   = c(1,1,0,0,1,1 ,0 , 0 ,0 ,1 ,1  ,0   , 0 ,1  ,0   ,0   , 0   ,0   ,1   ,0    )
+CWHM  = c(1,0,0,1,1,0 ,1 , 0 ,0 ,0 ,0  ,0   , 0 ,0  ,0   ,0   , 0   ,0   ,0   ,0    )
+CWHW  = c(1,1,0,1,1,0 ,1 , 0 ,1 ,1 ,0  ,0   , 0 ,0  ,1   ,0   , 0   ,0   ,0   ,0    )
+FWHM  = c(1,0,0,1,1,1 ,1 , 0 ,0 ,0 ,0  ,0   , 1 ,1  ,0   ,1   , 0   ,0   ,0   ,0    )
+FWHW  = c(1,1,0,1,1,1 ,1 , 0 ,1 ,1 ,1  ,0   , 1 ,1  ,1   ,1   , 0   ,1   ,1   ,1    )
+
+
+demo_matrix <- rbind('CG Asian men'=CAM,  
+                          'CG Asian women'=CAW,
+                          'FG Asian men'=FAM,  
+                          'FG Asian women'=FAW,
+                     'CG Black men'=CBM, 
+                          'CG Black women'=CBW,
+                          'FG Black men'=FBM, 
+                          'FG Black women'=FBW,
+                     'CG Hispanic men'=CHM, 
+                          'CG Hispanic women'=CHW,
+                          'FG Hispanic men'=FHM, 
+                          'FG Hispanic women'=FHW,
+                     'CG White men'=CWM,  
+                          'CG White women'=CWW,
+                          'FG White men'=FWM,  
+                          'FG White women'=FWW,
+                     'CG White Hispanic men'=CWHM,  
+                          'CG White Hispanic women'=CWHW,
+                          'FG White Hispanic men'=FWHM,  
+                          'FG White Hispanic women'=FWHW)
+
+temp <- get_est(mod,demo_matrix)
+
+
+return(temp)}
+```
+
+Function for calculating variance terms for MAIHDA models
+```{r}
+var_MAIHDA_fun <- function(scores) {
+temp <- posterior_samples(scores, c("sd_","sigma"))
+
+return(temp) }
+```
+
+Function for calculating outcomes in MAIHDA models pt 1
+```{r}
+pred_scores_MAIHDA <- function(posterior) {
+
+posterior <- posterior %>%
+  rename_with(~gsub(":", "_",.x, fixed = TRUE)) %>%
+  rename_with(~gsub("b_", "",.x, fixed = TRUE)) %>%
+  rename_with(~gsub("r_cluster[1", "c",.x, fixed = TRUE)) %>%
+  rename_with(~gsub(",Intercept]", "",.x, fixed = TRUE))
+
+#pretest
+Estimates <- posterior %>% 
+  mutate(#Asian
+    "CG Asian men" = Intercept + c100000, 
+         "CG Asian women" = Intercept + women + c100010,
+          "FG Asian men" = Intercept + FG + c100001,
+          "FG Asian women" = Intercept + women + FG + c100011,
+
+    #Black
+    "CG Black men" = Intercept + Black + c010000,
+         "CG Black women" = Intercept + Black + women + c010010,
+         "FG Black men" = Intercept + Black + FG + c010001,
+         "FG Black women" = Intercept + Black + women + FG + c010011,
+    #Hispanic
+    "CG Hispanic men" = Intercept + Hispanic + c001000,
+         "CG Hispanic women" = Intercept + Hispanic + women + c001010,
+         "FG Hispanic men" = Intercept + Hispanic + FG + c001001,
+         "FG Hispanic women" = Intercept + Hispanic + women + FG + c001011,
+    #White
+    "CG White men" = Intercept + White + c000100,
+         "CG White women" = Intercept + White + women + c000110,
+         "FG White men" = Intercept + White + FG + c000101,
+         "FG White women" = Intercept + White + women + FG + c000111,
+        #White Hispanic
+             "CG White Hispanic men" = Intercept + White + Hispanic + c001100,
+         "CG White Hispanic women" = Intercept + White + Hispanic + women + c001110,
+         "FG White Hispanic men" = Intercept + White + Hispanic + FG + c001101,
+         "FG White Hispanic women" = Intercept + White + Hispanic + women + FG + c001111) %>% 
+  
+  pivot_longer("CG Asian men":"FG White Hispanic women",
+               names_to = "soc_id") %>%
+  group_by(soc_id) %>%
+  mean_qi(value) %>% 
+  mutate_if(is.double, round, digits = 3) %>%
+  rename(Score = value,
+         group = soc_id) %>%
+  mutate(SE = (.upper-.lower)/4,
+         model = "MAIHDA",
+         CG = word(group, 1), 
+         Race = word(group, 2),
+         Gender = word(group, 3))
+
+return(Estimates)
+}
+```
+
+Function for calculating outcomes in MAIHDA models pt 2
+```{r}
+est_MAIHDA_fun <- function(scores) {
+temp <- posterior_samples(scores, c("b_", "bsp_","r_cluster"))
+pred_score_MAIHDA_out <- pred_scores_MAIHDA(temp)
+
+return(pred_score_MAIHDA_out) }
+```
+
+Function to string them together
+```{r}
+sim_HLM_fun <- function(n, set_seed) {
+#sim the data
+   set.seed (set_seed)
+  data.sim <- sim_data(n)
+#Run the models
+HLM_freq_mod <- HLM_freq_fun(data.sim)
+MAIHDA_mod <- MAIHDA_fun(data.sim)
+Unc_MAIHDA_mod <- Unc_MAIHDA_fun(data.sim)
+
+#get the variance terms
+Unc_MAIHDA_var <- var_MAIHDA_fun(Unc_MAIHDA_mod)
+Unc_MAIHDA_var$type <- "Unconditional"
+MAIHDA_var <- var_MAIHDA_fun(MAIHDA_mod)
+MAIHDA_var$type <- "MAIHDA"
+variance <- rbind(Unc_MAIHDA_var,MAIHDA_var)
+
+#get the estimates
+HLM_freq_est <- est_HLM_freq_fun(HLM_freq_mod)
+MAIHDA_est <- est_MAIHDA_fun(MAIHDA_mod)
+
+#Filter for the categories we want and rename them
+HLM_freq_est <- HLM_freq_est %>%
+  rename(Score = Q) %>%
+  mutate(model = "HLM_freq") %>%
+  dplyr::select(group, Score, SE, CG, Race, Gender, model)
+
+MAIHDA_est <- MAIHDA_est  %>%
+  dplyr::select(group, Score, SE, CG, Race, Gender, model)
+
+final <- rbind(HLM_freq_est,MAIHDA_est)
+final$N <- n
+result <- list(outcomes=final, var=variance)
+return(result)}
+```
+
+Forloop simulating data with N=500
+Missing iterations failed to run do to some groups having n=0
+```{r include=FALSE}
+#500 here
+out_500_1 <- foreach(i=1:11) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_1, file="out_500_1.rda")
+
+out_500_2 <- foreach(i=13:55) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_2, file="out_500_2.rda")
+
+out_500_3 <- foreach(i=57:120) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_3, file="out_500_3.rda")
+
+out_500_4 <- foreach(i=122:150) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_4, file="out_500_4.rda")
+
+out_500_5 <- foreach(i=151:158) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_5, file="out_500_5.rda")
+
+out_500_6 <- foreach(i=160) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_6, file="out_500_6.rda")
+
+out_500_7 <- foreach(i=163:171) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_7, file="out_500_7.rda")
+
+out_500_8 <- foreach(i=173:193) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_8, file="out_500_8.rda")
+
+out_500_9 <- foreach(i=195:208) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_9, file="out_500_9.rda")
+
+out_500_10 <- foreach(i=210:220) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_10, file="out_500_10.rda")
+
+out_500_11 <- foreach(i=222:223) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_11, file="out_500_11.rda")
+
+out_500_12 <- foreach(i=225:240) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_12, file="out_500_12.rda")
+
+out_500_13 <- foreach(i=242:250) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_13, file="out_500_13.rda")
+
+out_500_14 <- foreach(i=252:267) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_14, file="out_500_14.rda")
+
+out_500_15 <- foreach(i=269:279) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_15, file="out_500_15.rda")
+
+out_500_16 <- foreach(i=281:284) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_16, file="out_500_16.rda")
+
+out_500_17 <- foreach(i=286:294) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_17, file="out_500_17.rda")
+
+out_500_18 <- foreach(i=296:314) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_18, file="out_500_18.rda")
+
+out_500_19 <- foreach(i=316:326) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_19, file="out_500_19.rda")
+
+out_500_20 <- foreach(i=328:331) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_20, file="out_500_20.rda")
+
+out_500_21 <- foreach(i=333:360) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_21, file="out_500_21.rda")
+
+out_500_22 <- foreach(i=361:378) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_22, file="out_500_22.rda")
+
+out_500_23 <- foreach(i=380:410) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_23, file="out_500_23.rda")
+
+out_500_24 <- foreach(i=411:417) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_24, file="out_500_24.rda")
+
+out_500_25 <- foreach(i=419:425) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_25, file="out_500_25.rda")
+
+out_500_26 <- foreach(i=427:450) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_26, file="out_500_26.rda")
+
+out_500_27 <- foreach(i=451:470) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_27, file="out_500_27.rda")
+
+out_500_29 <- foreach(i=471:482) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_29, file="out_500_29.rda")
+
+out_500_30 <- foreach(i=484:520) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_30, file="out_500_30.rda")
+
+out_500_31 <- foreach(i=521:550) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_31, file="out_500_31.rda")
+
+out_500_32 <- foreach(i=551:567) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_32, file="out_500_32.rda")
+
+out_500_33 <- foreach(i=569:574) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_33, file="out_500_33.rda")
+
+out_500_34 <- foreach(i=576:588) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_34, file="out_500_34.rda")
+
+out_500_35 <- foreach(i=590:613) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_35, file="out_500_35.rda")
+
+out_500_36 <- foreach(i=615:633) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_36, file="out_500_36.rda")
+
+out_500_37 <- foreach(i=635:668) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_37, file="out_500_37.rda")
+
+out_500_38 <- foreach(i=670:671) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_38, file="out_500_38.rda")
+
+out_500_39 <- foreach(i=673:674) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_39, file="out_500_39.rda")
+
+out_500_40 <- foreach(i=676:697) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_40, file="out_500_40.rda")
+
+out_500_41 <- foreach(i=699) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_41, file="out_500_41.rda")
+
+out_500_42 <- foreach(i=701) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_42, file="out_500_42.rda")
+
+out_500_43 <- foreach(i=703:750) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_43, file="out_500_43.rda")
+
+out_500_44 <- foreach(i=751:786) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_44, file="out_500_44.rda")
+
+out_500_45 <- foreach(i=788:798) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_45, file="out_500_45.rda")
+
+out_500_46 <- foreach(i=800:806) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_46, file="out_500_46.rda")
+
+out_500_47 <- foreach(i=808:826) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_47, file="out_500_47.rda")
+
+out_500_48 <- foreach(i=828:850) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_48, file="out_500_48.rda")
+
+out_500_49 <- foreach(i=852:854) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_49, file="out_500_49.rda")
+
+out_500_50 <- foreach(i=856:877) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_50, file="out_500_50.rda")
+
+out_500_51 <- foreach(i=878:886) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_51, file="out_500_51.rda")
+
+out_500_52 <- foreach(i=888:900) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_52, file="out_500_52.rda")
+
+out_500_53 <- foreach(i=901:920) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_53, file="out_500_53.rda")
+
+out_500_54 <- foreach(i=921:936) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_54, file="out_500_54.rda")
+
+out_500_55 <- foreach(i=938:955) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_55, file="out_500_55.rda")
+
+out_500_56 <- foreach(i=956:975) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_56, file="out_500_56.rda")
+
+out_500_57 <- foreach(i=976:990) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_57, file="out_500_57.rda")
+
+out_500_58 <- foreach(i=992:1000) %dopar% {sim_HLM_fun(500,i)}
+save(out_500_58, file="out_500_58.rda")
+```
+
+Forloop simulating data with N=1000
+```{r include=FALSE}
+out_1000_1 <- foreach(i=1:50) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_1, file="out_1000_1.rda")
+
+out_1000_2 <- foreach(i=51:100) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_2, file="out_1000_2.rda")
+
+out_1000_3 <- foreach(i=101:150) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_3, file="out_1000_3.rda")
+
+out_1000_4 <- foreach(i=151:200) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_4, file="out_1000_4.rda")
+
+out_1000_5 <- foreach(i=201:250) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_5, file="out_1000_5.rda")
+
+out_1000_6 <- foreach(i=251:300) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_6, file="out_1000_6.rda")
+
+out_1000_7 <- foreach(i=301:350) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_7, file="out_1000_7.rda")
+
+out_1000_8 <- foreach(i=351:400) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_8, file="out_1000_8.rda")
+
+out_1000_9 <- foreach(i=401:450) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_9, file="out_1000_9.rda")
+
+out_1000_10 <- foreach(i=451:500) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_10, file="out_1000_10.rda")
+
+out_1000_11 <- foreach(i=501:550) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_11, file="out_1000_11.rda")
+
+out_1000_12 <- foreach(i=551:600) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_12, file="out_1000_12.rda")
+
+out_1000_13 <- foreach(i=601:650) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_13, file="out_1000_13.rda")
+
+out_1000_14 <- foreach(i=651:700) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_14, file="out_1000_14.rda")
+
+out_1000_15 <- foreach(i=701:750) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_15, file="out_1000_15.rda")
+
+out_1000_16 <- foreach(i=751:800) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_16, file="out_1000_16.rda")
+
+out_1000_17 <- foreach(i=801:850) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_17, file="out_1000_17.rda")
+
+out_1000_18 <- foreach(i=851:900) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_18, file="out_1000_18.rda")
+
+out_1000_19 <- foreach(i=901:950) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_19, file="out_1000_19.rda")
+
+out_1000_20 <- foreach(i=951:1000) %dopar% {sim_HLM_fun(1000,i)}
+save(out_1000_20, file="out_1000_20.rda")
+```
+
+Forloop simulating data with N=5000
+```{r include=FALSE}
+#5000 here
+Sys.time()
+out_5000_1 <- foreach(i=1:50) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_1, file="out_5000_1.rda")
+Sys.time()
+
+out_5000_2 <- foreach(i=51:100) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_2, file="out_5000_2.rda")
+
+out_5000_3 <- foreach(i=101:150) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_3, file="out_5000_3.rda")
+
+out_5000_4 <- foreach(i=151:200) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_4, file="out_5000_4.rda")
+
+out_5000_5 <- foreach(i=201:250) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_5, file="out_5000_5.rda")
+
+out_5000_6 <- foreach(i=251:300) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_6, file="out_5000_6.rda")
+
+out_5000_7 <- foreach(i=301:350) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_7, file="out_5000_7.rda")
+
+out_5000_8 <- foreach(i=351:400) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_8, file="out_5000_8.rda")
+
+out_5000_9 <- foreach(i=401:450) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_9, file="out_5000_9.rda")
+
+out_5000_10 <- foreach(i=451:500) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_10, file="out_5000_10.rda")
+
+out_5000_11 <- foreach(i=501:550) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_11, file="out_5000_11.rda")
+
+out_5000_12 <- foreach(i=551:600) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_12, file="out_5000_12.rda")
+
+out_5000_13 <- foreach(i=601:650) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_13, file="out_5000_13.rda")
+
+out_5000_14 <- foreach(i=651:700) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_14, file="out_5000_14.rda")
+
+out_5000_15 <- foreach(i=701:750) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_15, file="out_5000_15.rda")
+
+out_5000_16 <- foreach(i=751:800) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_16, file="out_5000_16.rda")
+
+out_5000_17 <- foreach(i=801:850) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_17, file="out_5000_17.rda")
+
+out_5000_18 <- foreach(i=851:900) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_18, file="out_5000_18.rda")
+
+out_5000_19 <- foreach(i=901:950) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_19, file="out_5000_19.rda")
+
+out_5000_20 <- foreach(i=951:1000) %dopar% {sim_HLM_fun(5000,i)}
+save(out_5000_20, file="out_5000_20.rda")
+```
+
+Combine files
+```{r}
+temp <- c(out_500_1, out_500_2, out_500_3, out_500_4, out_500_5, out_500_6, out_500_7, out_500_8, out_500_9, out_500_10, out_500_11, out_500_12, out_500_13, out_500_14, out_500_15, out_500_16, out_500_17, out_500_18, out_500_19, out_500_20,
+          out_500_21, out_500_22, out_500_23, out_500_24, out_500_25, out_500_26, out_500_27, out_500_29, out_500_30,
+          out_500_31, out_500_32, out_500_33, out_500_34, out_500_35, out_500_36, out_500_37, out_500_38, out_500_39, out_500_40,
+          out_500_41, out_500_42, out_500_43, out_500_44, out_500_45, out_500_46, out_500_47, out_500_48, out_500_49, out_500_50,
+          out_500_51, out_500_52, out_500_53, out_500_54, out_500_55, out_500_56, out_500_57, out_500_58,
+          out_1000_1, out_1000_2, out_1000_3, out_1000_4, out_1000_5, out_1000_6, out_1000_7, out_1000_8, out_1000_9, out_1000_10, out_1000_11, out_1000_12, out_1000_13, out_1000_14, out_1000_15, out_1000_16, out_1000_17, out_1000_18, out_1000_19, out_1000_20,
+          out_5000_1, out_5000_2, out_5000_3, out_5000_4, out_5000_5, out_5000_6, out_5000_7, out_5000_8, out_5000_9, out_5000_10, out_5000_11, out_5000_12, out_5000_13, out_5000_14, out_5000_15, out_5000_16, out_5000_17, out_5000_18, out_5000_19, out_5000_20)
+
+outcomes <- lapply(temp, '[[', 'outcomes')
+var <- lapply(temp, '[[', 'var')
+
+#separate out the predicted outcomes from the variance information
+df <- bind_rows(outcomes, .id = "column_label")
+var_comb <- bind_rows(var, .id = "column_label")
+```
+
+function for calculating subgroup N
+```{r}
+sim_data_sub_N <- function(n,seed){
+set.seed(seed)
+      Sim<-data.frame(Race = sample(c(0,1,2,3,4),n, replace = TRUE, prob=c(.17,.07,.09,.77,.12)),
+                      women = sample(c(0,1),n, replace = TRUE, prob=c(.64,.36)),
+                      FG = sample(c(0,1),n, replace = TRUE, prob=c(.64,.36)))
+Sim <- Sim  %>%
+  mutate(Asian = ifelse(Race==0,1,0),
+         Black = ifelse(Race==1,1,0),
+         Hispanic = ifelse(Race==2 | Race==4,1,0),
+         White = ifelse(Race==3 | Race==4,1,0),
+         cluster = (1000000 + 100000*(Asian) +10000*(Black) +1000*(Hispanic) +100*(White) + 10*(women) + 1*(FG)))
+
+N_sub <- Sim %>% group_by(cluster) %>%
+  summarise(N_groups=n()) %>%
+  mutate(group=c("CG White men","FG White men","CG White women","FG White women","CG Hispanic men","FG Hispanic men","CG Hispanic women","FG Hispanic women", "CG White Hispanic men","FG White Hispanic men","CG White Hispanic women", "FG White Hispanic women", "CG Black men","FG Black men","CG Black women","FG Black women","CG Asian men","FG Asian men","CG Asian women","FG Asian women")) %>%
+  arrange(match(group,c("CG Asian men", "CG Asian women", "CG Black men", "CG Black women", "CG Hispanic men", "CG Hispanic women", "CG White Hispanic men", "CG White Hispanic women", "CG White men", "CG White women", 
+                          "FG Asian men", "FG Asian women", "FG Black men", "FG Black women", "FG Hispanic men", "FG Hispanic women", "FG White Hispanic men", "FG White Hispanic women", "FG White men", "FG White women")))
+    
+
+return(N_sub)}
+```
+
+Get N for subgroup and add it back into df
+```{r}
+include <- c(1:11,13:55, 57:120, 122:150, 151:158,
+             160, 163:171, 173:193, 195:208, 210:220,
+             222:223, 225:240, 242:250, 252:267, 269:279,
+             281:284, 286:294, 296:314, 316:326, 328:331,
+             333:360, 361:378, 380:410, 411:417, 419:425,
+             427:450, 451:470, 471:482, 484:520, 521:550,
+             551:567, 569:574, 576:588, 590:613, 615:633,
+             635:668, 670:671, 673:674, 676:697, 699,
+             701, 703:750, 751:786, 788:798, 800:806,
+             808:826, 828:850, 852:854, 856:877, 878:886,
+             888:900, 901:920, 921:936, 938:955, 956:975,
+             976:990, 992:1000)
+
+N_500 <- foreach(i = include) %dopar% {sim_data_sub_N(500,i)}
+save(N_500, file="N_500.rda")
+
+N_1000 <- foreach(i=1:1000) %dopar% {sim_data_sub_N(1000,i)}
+save(N_1000, file="N_1000.rda")
+
+N_5000 <- foreach(i=1:1000) %dopar% {sim_data_sub_N(5000,i)}
+save(N_5000, file="N_5000.rda")
+
+temp <- rep(c(N_500, N_1000, N_5000), each = 2)
+temp_2 <- bind_rows(temp, .id = "column_label")
+df <- cbind(df,temp_2[,"N_groups"])
+save(df, file="df.rda")
+```
+
+Calculate variances
+```{r}
+var_comb <- var_comb %>%
+  mutate(    PVC_course = sd_course__Intercept^2 / (sd_course__Intercept^2 + sd_cluster__Intercept^2 + sigma^2),
+         PVC_cluster = sd_cluster__Intercept^2 / (sd_course__Intercept^2 + sd_cluster__Intercept^2 + sigma^2))
+
+var_sum <- var_comb %>% group_by(type) %>%
+  summarise(sd_student_2 = mean(sigma)^2,
+         sd_course_2 = mean(sd_course__Intercept)^2,
+         sd_cluster_2 = mean(sd_cluster__Intercept)^2,
+         PVC_course=mean(PVC_course),
+            PVC_cluster=mean(PVC_cluster)) 
+
+save(var_sum, file="var_sum.rda")
+```
+

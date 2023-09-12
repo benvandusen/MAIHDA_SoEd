@@ -1,0 +1,112 @@
+---
+title: "Evaluation"
+output: html_document
+date: '2022-07-20'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringr)
+```
+
+Load the data
+```{r}
+load("~/MAIHDA_SoEd/df.rda")
+```
+
+Expected values
+```{r}
+Group <- c("CG Asian men", 'CG Asian women', 'CG Black men', 'CG Black women', 'CG Hispanic men', 'CG Hispanic women', 'CG White Hispanic men', 'CG White Hispanic women', 'CG White men', 'CG White women', 
+           'FG Asian men', 'FG Asian women', 
+            'FG Black men', 'FG Black women', 
+            'FG Hispanic men', 'FG Hispanic women', 'FG White Hispanic men', 'FG White Hispanic women',
+            'FG White men', 'FG White women')
+Exp_val <- as.data.frame(Group) %>%
+  mutate(Asian = ifelse(str_detect(Group, "Asian")==TRUE,1,0),
+         Black = ifelse(str_detect(Group, "Black")==TRUE,1,0),
+         Hispanic = ifelse(str_detect(Group, "Hispanic")==TRUE,1,0),
+         White = ifelse(str_detect(Group, "White")==TRUE,1,0),
+         White_Hispanic = ifelse(str_detect(Group, "White")==TRUE,ifelse(str_detect(Group, "Hispanic")==TRUE,1,0),0),
+         women = ifelse(str_detect(Group, "women"),1,0),
+         men = ifelse(women==1,0,1),
+         FG = ifelse(str_detect(Group, "FG"),1,0),
+         CG = ifelse(str_detect(Group, "CG"),1,0),
+         True_score = 47 - 3*FG -10*women -6*Black -10*Hispanic +2*White +3*FG*women +1*White*Hispanic -1*FG*Black +2*FG*Hispanic +2*FG*White -2*women*Black + 1*women*Hispanic -4*women*White - 1*FG*White*Hispanic + 5*women*White*Hispanic + 4*FG*women*Black + 1*FG*women*White - 1* FG*women*White*Hispanic)
+```
+
+Add in the values we actually got and compare
+```{r}
+eval_df <- df %>%
+  mutate(True_score = rep(Exp_val$True_score,5912),
+         dif = Score - True_score,
+         dif_abs = abs(dif),
+         model = as.factor(model),
+         column_label = as.factor(column_label),
+         N_fac=as.factor(N),
+         group = gsub("Men","men",group),
+         group = gsub("Women","women",group),
+         group = as.factor(group),
+         model = ifelse(model=="MAIHDA","MAIHDA","Fixed Effect")) %>%
+  mutate_if(is.double, round, digits = 3)
+  
+#summary of the evaluated data
+sum_eval_df <- eval_df %>% group_by(model,column_label) %>%
+   summarise(mean_dif=mean(abs(dif)),
+             mean_SE=mean(SE),
+             N=mean(N)) %>%
+  mutate(N_fac=as.factor(N),
+          model = ifelse(model=="HLM_bay","Fixed Effect","MAIHDA"))
+
+bias_df <- eval_df %>% group_by(N_groups,model,N_fac) %>%
+  summarise(bias=mean(dif),
+            SD = sd(dif),
+            N= n(),
+            SE = SD/sqrt(N))
+
+
+save(eval_df, file="eval_df.rda")
+save(sum_eval_df, file="sum_eval_df.rda")
+save(bias_df, file="bias_df.rda")
+```
+
+Summary table
+```{r}
+sum_table <- eval_df %>% group_by(N_fac, group, model) %>%
+  summarise(N= mean(N_groups),
+         True_score = mean(True_score),
+         Diff_from_true = mean(dif_abs),
+         SE = mean(SE))
+
+test <- sum_table %>%
+  pivot_wider(names_from= model, values_from = c(Diff_from_true, SE))
+
+sum_table_wide <- test[with(test,order(group,N_fac)),]
+
+save(sum_table, file="sum_table.rda")
+save(sum_table_wide, file="sum_table_wide.rda")
+```
+
+Absolute error table
+```{r}
+SD_table <- eval_df %>% group_by(as.factor(N_groups),model,N_fac) %>%
+  summarise(mean = mean(abs(dif)),
+            sd = sd(dif),
+            N = n()) %>%
+  rename("N_groups" = "as.factor(N_groups)") %>%
+  mutate(N_groups = as.numeric(N_groups)) %>%
+  filter(N_groups < 21)
+
+test <- SD_table %>%
+  dplyr::select(-N) %>%
+  pivot_wider(names_from= c(model,N_fac), values_from = c(mean, sd))
+
+SD_table_wide <- test[with(test,order(N_groups)),]
+SD_table_wide <- SD_table_wide[,c("N_groups", "mean_Fixed Effect_500", "sd_Fixed Effect_500", "mean_MAIHDA_500", "sd_MAIHDA_500","mean_Fixed Effect_1000","sd_Fixed Effect_1000","mean_MAIHDA_1000","sd_MAIHDA_1000")]
+
+
+save(SD_table, file="SD_table.rda")
+write.csv(SD_table, file="SD_table.csv")
+save(SD_table_wide, file="SD_table_wide.rda")
+write.csv(SD_table_wide, file="SD_table_wide.csv")
+```

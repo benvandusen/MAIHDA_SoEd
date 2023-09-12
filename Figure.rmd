@@ -75,14 +75,14 @@ ggplot(data=filter(SD_table), aes(x=as.factor(N_groups), y=mean)) +
   # geom_jitter(shape = 19,size=.05,  alpha=0.3, width=0.0) + 
  guides(colour = guide_legend(override.aes = list(size=1, alpha=1))) +
 
-  theme(legend.position = "right",  axis.text.x=element_text(angle=0) , axis.ticks.x=element_blank(),panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"),text = element_text(size=16, color = "black")) +
+  theme(legend.position = "right",  axis.text.x=element_text(angle=0) , axis.ticks.x=element_blank(),panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black"),text = element_text(size=12, color = "black")) +
   scale_color_manual(values=cbbpalette) +
   labs(color="Total sample \nsize", x="Group sample size") +
 
   ylab("Mean Absolute True Error")  +
   scale_y_continuous(limits = c(0,16)) +
   scale_x_discrete(breaks = c(0,5,10,15,20))+
-        geom_hline(yintercept=4.4, alpha = 0.3, linetype = "dashed") +
+        geom_hline(yintercept=3.8, alpha = 0.3, linetype = "dashed") +
       facet_grid(model ~ N_fac) 
 
 #Saves the image
